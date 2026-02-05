@@ -975,29 +975,41 @@
         }
 
         function aiPlaceInitial(aiBoard, style) {
-            const hand = aiBoard.hand.sort((a, b) => RANK_VALUES[b.rank] - RANK_VALUES[a.rank]);
+            const hand = [...aiBoard.hand].sort((a, b) => RANK_VALUES[b.rank] - RANK_VALUES[a.rank]);
             const rankCounts = {};
             hand.forEach(c => rankCounts[c.rank] = (rankCounts[c.rank] || 0) + 1);
 
-            const pairs = hand.filter(c => rankCounts[c.rank] === 2);
-            const singles = hand.filter(c => rankCounts[c.rank] !== 2);
-            let placed = { front: 0, middle: 0, back: 0 };
             const flRanks = style === 'aggressive' ? ['J', 'Q', 'K', 'A'] : ['Q', 'K', 'A'];
+            const placed = new Set();
 
-            for (let i = 0; i < pairs.length && i < 2; i++) {
-                if (flRanks.includes(pairs[i].rank) && placed.front < 2) {
-                    aiBoard.front.push(pairs[i]); placed.front++;
-                } else if (placed.back < 3) {
-                    aiBoard.back.push(pairs[i]); placed.back++;
-                } else {
-                    aiBoard.middle.push(pairs[i]); placed.middle++;
+            // First: try to place ONE high pair to front for Fantasy Land chase
+            for (const card of hand) {
+                if (placed.size >= 2) break; // Only one pair to front
+                if (rankCounts[card.rank] === 2 && flRanks.includes(card.rank)) {
+                    hand.filter(c => c.rank === card.rank).forEach(c => {
+                        aiBoard.front.push(c);
+                        placed.add(cardKey(c));
+                    });
+                    break;
                 }
             }
 
-            for (const card of singles) {
-                if (placed.back < 2) { aiBoard.back.push(card); placed.back++; }
-                else if (placed.middle < 2) { aiBoard.middle.push(card); placed.middle++; }
-                else if (placed.front < 1) { aiBoard.front.push(card); placed.front++; }
+            // Second: place remaining cards (back 2, middle 2, front 1)
+            let backCount = 0, middleCount = 0, frontCount = aiBoard.front.length;
+            for (const card of hand) {
+                if (placed.has(cardKey(card))) continue;
+
+                if (backCount < 2) {
+                    aiBoard.back.push(card);
+                    backCount++;
+                } else if (middleCount < 2) {
+                    aiBoard.middle.push(card);
+                    middleCount++;
+                } else if (frontCount < 1) {
+                    aiBoard.front.push(card);
+                    frontCount++;
+                }
+                placed.add(cardKey(card));
             }
             aiBoard.hand = [];
         }
