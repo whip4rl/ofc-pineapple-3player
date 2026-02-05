@@ -976,41 +976,124 @@
 
         function aiPlaceInitial(aiBoard, style) {
             const hand = [...aiBoard.hand].sort((a, b) => RANK_VALUES[b.rank] - RANK_VALUES[a.rank]);
-            const rankCounts = {};
-            hand.forEach(c => rankCounts[c.rank] = (rankCounts[c.rank] || 0) + 1);
+            const isAggressive = style === 'aggressive';
 
-            const flRanks = style === 'aggressive' ? ['J', 'Q', 'K', 'A'] : ['Q', 'K', 'A'];
-            const placed = new Set();
+            // Analyze hand composition
+            const rankCounts = {}, suitCounts = {};
+            hand.forEach(c => {
+                rankCounts[c.rank] = (rankCounts[c.rank] || 0) + 1;
+                suitCounts[c.suit] = (suitCounts[c.suit] || 0) + 1;
+            });
 
-            // First: try to place ONE high pair to front for Fantasy Land chase
-            for (const card of hand) {
-                if (placed.size >= 2) break; // Only one pair to front
-                if (rankCounts[card.rank] === 2 && flRanks.includes(card.rank)) {
-                    hand.filter(c => c.rank === card.rank).forEach(c => {
-                        aiBoard.front.push(c);
-                        placed.add(cardKey(c));
+            // Find patterns
+            const tripRank = Object.keys(rankCounts).find(r => rankCounts[r] === 3);
+            const pairRanks = Object.keys(rankCounts).filter(r => rankCounts[r] === 2);
+            const flushSuit = Object.entries(suitCounts).find(([s, c]) => c >= 3)?.[0];
+            const flushCount = flushSuit ? suitCounts[flushSuit] : 0;
+
+            // Check straight potential (4+ cards within 5-card span)
+            const values = hand.map(c => RANK_VALUES[c.rank]);
+            const uniqueVals = [...new Set(values)].sort((a, b) => a - b);
+            const hasStraightDraw = uniqueVals.length >= 4 &&
+                (uniqueVals[uniqueVals.length - 1] - uniqueVals[0] <= 4 ||
+                 (uniqueVals.includes(14) && uniqueVals.filter(v => v <= 5).length >= 3)); // Wheel draw
+
+            // Track placement
+            const placement = { front: [], middle: [], back: [] };
+            const used = new Set();
+
+            // DECISION 1: Trips in front? (Rare, high-risk/high-reward play)
+            // Aggressive: 12% chance, Conservative: 4% chance
+            if (tripRank && rng() < (isAggressive ? 0.12 : 0.04)) {
+                hand.filter(c => c.rank === tripRank).forEach(c => {
+                    placement.front.push(c);
+                    used.add(cardKey(c));
+                });
+            }
+
+            // DECISION 2: High pair to front for Fantasy Land chase?
+            // Not automatic - aggressive chases more often and with weaker pairs
+            if (placement.front.length === 0 && pairRanks.length > 0) {
+                const flRanks = isAggressive ? ['J', 'Q', 'K', 'A'] : ['Q', 'K', 'A'];
+                const highPair = pairRanks.find(r => flRanks.includes(r));
+                const chaseChance = isAggressive ? 0.70 : 0.50;
+                if (highPair && rng() < chaseChance) {
+                    hand.filter(c => c.rank === highPair).forEach(c => {
+                        placement.front.push(c);
+                        used.add(cardKey(c));
                     });
-                    break;
                 }
             }
 
-            // Second: place remaining cards (back 2, middle 2, front 1)
-            let backCount = 0, middleCount = 0, frontCount = aiBoard.front.length;
-            for (const card of hand) {
-                if (placed.has(cardKey(card))) continue;
-
-                if (backCount < 2) {
-                    aiBoard.back.push(card);
-                    backCount++;
-                } else if (middleCount < 2) {
-                    aiBoard.middle.push(card);
-                    middleCount++;
-                } else if (frontCount < 1) {
-                    aiBoard.front.push(card);
-                    frontCount++;
-                }
-                placed.add(cardKey(card));
+            // DECISION 3: Stack flush draw in back?
+            // 4-flush: almost always stack; 3-flush: sometimes
+            const flushStackChance = flushCount >= 4 ? 0.88 : (isAggressive ? 0.50 : 0.30);
+            if (flushCount >= 3 && rng() < flushStackChance) {
+                hand.filter(c => c.suit === flushSuit && !used.has(cardKey(c))).forEach(c => {
+                    placement.back.push(c);
+                    used.add(cardKey(c));
+                });
             }
+
+            // DECISION 4: Stack straight draw in back?
+            // Only if we haven't committed elsewhere and have good connectivity
+            if (hasStraightDraw && placement.back.length === 0 && rng() < (isAggressive ? 0.40 : 0.25)) {
+                // Put the 4 most connected cards in back
+                const sortedHand = [...hand].filter(c => !used.has(cardKey(c)))
+                    .sort((a, b) => RANK_VALUES[a.rank] - RANK_VALUES[b.rank]);
+                sortedHand.slice(0, 4).forEach(c => {
+                    placement.back.push(c);
+                    used.add(cardKey(c));
+                });
+            }
+
+            // DECISION 5: Distribute remaining cards with varied strategies
+            const remaining = hand.filter(c => !used.has(cardKey(c)));
+            const distRoll = rng();
+
+            // Determine target distribution based on what's already placed
+            let targetBack, targetFront;
+
+            if (placement.back.length >= 3) {
+                // Already committed to back draw - conservative fill
+                targetBack = Math.min(2, 5 - placement.back.length);
+                targetFront = placement.front.length > 0 ? 0 : 1;
+            } else if (distRoll < 0.50) {
+                // Standard: back 2, front 1 (most balanced)
+                targetBack = 2 - placement.back.length;
+                targetFront = placement.front.length > 0 ? 0 : 1;
+            } else if (distRoll < 0.72) {
+                // Heavy back: 3-1-1 (good for completing draws)
+                targetBack = 3 - placement.back.length;
+                targetFront = placement.front.length > 0 ? 0 : 1;
+            } else if (distRoll < 0.86) {
+                // Delay front: 2-3-0 (keep front options open)
+                targetBack = 2 - placement.back.length;
+                targetFront = 0;
+            } else {
+                // Light back: 1-3-1 (middle-heavy)
+                targetBack = Math.max(0, 1 - placement.back.length);
+                targetFront = placement.front.length > 0 ? 0 : 1;
+            }
+
+            // Place remaining cards
+            let backPlaced = 0, frontPlaced = 0;
+            for (const card of remaining) {
+                if (backPlaced < targetBack) {
+                    placement.back.push(card);
+                    backPlaced++;
+                } else if (frontPlaced < targetFront) {
+                    placement.front.push(card);
+                    frontPlaced++;
+                } else {
+                    placement.middle.push(card);
+                }
+            }
+
+            // Apply to board
+            aiBoard.front = placement.front;
+            aiBoard.middle = placement.middle;
+            aiBoard.back = placement.back;
             aiBoard.hand = [];
         }
 
